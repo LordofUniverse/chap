@@ -1,0 +1,741 @@
+#include "ooo_cpu.h"
+#include <cstdlib>
+#include <bitset>
+#include <stdlib.h>  
+
+#define BIMODAL_TABLE_SIZE 4096
+#define BANK_TABLE_SIZE 1024
+#define GLOBAL_HISTORY_LENGTH 80
+
+// int global_history[GLOBAL_HISTORY_LENGTH];
+bitset<GLOBAL_HISTORY_LENGTH> GHR;
+bitset<GLOBAL_HISTORY_LENGTH> temp;
+bitset<GLOBAL_HISTORY_LENGTH> mask;
+bitset<GLOBAL_HISTORY_LENGTH> CSR1_mask;
+bitset<GLOBAL_HISTORY_LENGTH> CSR2_mask;
+
+// Track X bank
+uint8_t bank_chosen;
+uint8_t bank_pred;
+uint16_t tag;
+uint16_t index0;
+uint16_t index1;
+uint16_t index2;
+uint16_t index3;
+uint16_t index4;
+
+// Always put msb value as first digit of counter when u initialising reinitialising couter
+
+struct BimodalCell {
+    uint8_t counter;
+    uint8_t m;
+    uint8_t msb;
+};
+
+struct BankCell {
+    uint8_t counter;
+    uint8_t tag;
+    uint8_t u;
+    uint8_t msb;
+};
+
+// 4 bits -> 3 for counter, 1 for m
+BimodalCell bimodal_table[BIMODAL_TABLE_SIZE];
+
+// 12 bits -> 3 for counter, 8 for tag, 1 for u
+BankCell bank1_table[BANK_TABLE_SIZE];
+BankCell bank2_table[BANK_TABLE_SIZE];
+BankCell bank3_table[BANK_TABLE_SIZE];
+BankCell bank4_table[BANK_TABLE_SIZE];
+
+void O3_CPU::initialize_branch_predictor() {
+    cout << "CPU " << cpu << " CBP PPM branch predictor" << endl;
+
+    for(int i = 0; i < BIMODAL_TABLE_SIZE; i++) {
+        bimodal_table[i].counter = 4;
+        bimodal_table[i].m = 0;
+        bimodal_table[i].msb = 1;
+    }
+
+    for(int i = 0; i < BANK_TABLE_SIZE; i++) {
+        bank1_table[i].counter = 4;
+        bank1_table[i].u = 0;
+        bank1_table[i].msb = 1;
+        bank1_table[i].tag = 0;
+
+        bank2_table[i].counter = 4;
+        bank2_table[i].u = 0;
+        bank2_table[i].msb = 1;
+        bank2_table[i].tag = 0;
+        
+        bank3_table[i].counter = 4;
+        bank3_table[i].u = 0;
+        bank3_table[i].msb = 1;
+        bank3_table[i].tag = 0;
+        
+        bank4_table[i].counter = 4;
+        bank4_table[i].u = 0;
+        bank4_table[i].msb = 1;
+        bank4_table[i].tag = 0;
+    }
+
+    for(int i = 0; i < GLOBAL_HISTORY_LENGTH; i++) {
+        if (i > 9) {
+            mask.set(i, 0);
+        } else {
+            mask.set(i, 1);
+        }
+
+        if (i > 7) {
+            CSR1_mask.set(i, 0);
+        } else {
+            CSR1_mask.set(i, 1);
+        }
+        
+        if (i > 6) {
+            CSR2_mask.set(i, 0);
+        } else {
+            CSR2_mask.set(i, 1);
+        }
+    }
+
+    bank_chosen = 0;
+    bank_pred = 0;
+    tag = 0;
+
+    GHR.reset();
+    temp.reset();
+
+}
+
+uint8_t O3_CPU::predict_branch(uint64_t ip) {
+    
+    temp = GHR;
+
+    index0 = (ip & ~(~0 << 12));
+
+    index1 = (ip & ~(~0 << 10)) ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 10;
+    index2 = index1 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 20;
+    index3 = index2 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 30;
+    index3 = index3 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 40;
+    index4 = index3 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 50;
+    index4 = index4 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 60;
+    index4 = index4 ^ (temp &= mask).to_ulong();
+    temp = GHR;
+    temp >>= 70;
+    index4 = index4 ^ (temp &= mask).to_ulong();
+    
+    BimodalCell bank0_value = bimodal_table[index0];
+    BankCell bank1_value = bank1_table[index1];
+    BankCell bank2_value = bank2_table[index2];
+    BankCell bank3_value = bank3_table[index3];
+    BankCell bank4_value = bank4_table[index4];
+
+    temp = GHR;
+
+    tag = (ip & ~(~0 << 8)) ^ (temp &= CSR1_mask).to_ulong();
+    temp >>= 8;
+    temp = GHR;
+    tag = tag ^ ((temp &= CSR2_mask).to_ulong() << 1);
+
+    uint16_t bank0_value_pred = bank0_value.msb;
+
+    uint16_t bank1_value_tag = bank1_value.tag;
+    uint16_t bank1_value_pred = bank1_value.msb;
+    uint16_t bank2_value_tag = bank2_value.tag;
+    uint16_t bank2_value_pred = bank2_value.msb;
+    uint16_t bank3_value_tag = bank3_value.tag;
+    uint16_t bank3_value_pred = bank3_value.msb;
+    uint16_t bank4_value_tag = bank4_value.tag;
+    uint16_t bank4_value_pred = bank4_value.msb;
+    
+     if (bank4_value_tag == tag) {
+        bank_chosen = 4;
+        bank_pred = bank4_value_pred;
+        cout<<tag<<" : "<<bank4_value_pred<<endl ; 
+        return bank4_value_pred;
+    } else if (bank3_value_tag == tag) {
+        bank_chosen = 3;
+        bank_pred = bank3_value_pred;
+        cout<<tag<<" : "<<bank3_value_pred<<endl ; 
+        return bank3_value_pred;
+    } else if (bank2_value_tag == tag) {
+        bank_chosen = 2;
+        bank_pred = bank2_value_pred;
+        cout<<tag<<" : "<<bank2_value_pred<<endl ; 
+
+        return bank2_value_pred;
+    } else if (bank1_value_tag == tag) {
+        bank_chosen = 1;
+        bank_pred = bank1_value_pred;
+        cout<<tag<<" : "<<bank1_value_pred<<endl ; 
+
+        return bank1_value_pred;
+    } else {
+        bank_chosen = 0;
+        bank_pred = bank0_value_pred;
+        cout<<tag<<" : "<<bank0_value_pred<<endl ; 
+
+        return bank0_value_pred;
+    }
+
+
+}
+
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken) {
+srand(1);
+    GHR = (GHR << 1);
+    GHR.set(0, taken);
+
+    // update counter
+    if (bank_chosen == 4) {
+        BankCell bank4_value = bank4_table[index4];
+        uint8_t bank4_ctr = bank4_value.counter;
+        if (taken) {
+            if (bank4_ctr < 7) {
+                bank4_table[index4].counter += 1;
+            }
+        } else {
+            if (bank4_ctr > 0) {
+                bank4_table[index4].counter -= 1;
+            }
+        }
+    } else if (bank_chosen == 3) {
+        BankCell bank3_value = bank3_table[index3];
+        uint8_t bank3_ctr = bank3_table[index4].counter;
+
+        if (taken) {
+            if (bank3_ctr < 7) {
+                bank3_table[index3].counter += 1;
+            }
+        } else {
+            if (bank3_ctr > 0) {
+                bank3_table[index3].counter -= 1;
+            }
+        }
+    } else if (bank_chosen == 2) {
+        BankCell bank2_value = bank2_table[index2];
+        uint8_t bank2_ctr = bank2_value.counter;
+
+        if (taken) {
+            if (bank2_ctr < 7) {
+                bank2_table[index2].counter += 1;
+            }
+        } else {
+            if (bank2_ctr > 0) {
+                bank2_table[index2].counter -= 1;
+            }
+        }
+    } else if (bank_chosen == 1) {
+        BankCell bank1_value = bank1_table[index1];
+        uint8_t bank1_ctr = bank1_value.counter;
+
+        if (taken) {
+            if (bank1_ctr < 7) {
+                bank1_table[index1].counter += 1;
+            }
+        } else {
+            if (bank1_ctr > 0) {
+                bank1_table[index1].counter -= 1;
+            }
+        }
+    } else {
+        BimodalCell bank0_value = bimodal_table[index0];
+        uint8_t bank0_ctr = bank0_value.counter;
+
+        if (taken) {
+            if (bank0_ctr < 7) {
+                bimodal_table[index0].counter += 1;
+            }
+        } else {
+            if (bank0_ctr > 0) {
+                bimodal_table[index0].counter -= 1;
+            }
+        }
+    }
+
+
+    // X <= 3
+    if (bank_pred != taken) {
+
+        if (bank_chosen == 3) {
+
+            uint8_t bank4_u = bank4_table[index4].u;
+            uint8_t bank_m = bimodal_table[index0].m;
+            uint8_t newctr = 0;
+
+            if (bank_m) {
+                if (taken) {
+                    newctr = 4;
+                } else {
+                    newctr = 3;
+                }
+            } else {
+                if ((bimodal_table[index0].msb)) {
+                    newctr = 4; 
+                } else {
+                    newctr = 3; 
+                }
+            }
+
+            bank4_table[index4].counter = newctr;
+            bank4_table[index4].msb = (newctr >> 2);
+            bank4_table[index4].tag = tag;
+            bank4_table[index4].u = 0;
+
+            
+        } else if (bank_chosen == 2) {
+
+            uint16_t bank4_u = bank4_table[index4].u;
+            uint16_t bank3_u = bank3_table[index3].u;
+            uint16_t bank_m = bimodal_table[index0].m;
+            uint8_t newctr = 0;
+
+            if (bank4_u && bank3_u) {
+                uint8_t random_choice = rand() % 2;
+                if (random_choice == 0) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+                } else {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+
+                }
+            } else {
+                if (!bank4_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+                }
+
+                if (!bank3_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+                }
+            }
+
+            
+        } else if (bank_chosen == 1) {
+
+            uint16_t bank4_u = bank4_table[index4].u;
+            uint16_t bank3_u = bank3_table[index3].u;
+            uint16_t bank2_u = bank2_table[index2].u;
+            uint16_t bank_m = bimodal_table[index0].m;
+            uint8_t newctr = 0;
+
+            if (bank4_u && bank3_u && bank2_u) {
+                uint8_t random_choice = rand() % 3;
+                if (random_choice == 0) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+
+                } else if (random_choice == 1) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+
+                } else {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank2_table[index2].counter = newctr;
+                    bank2_table[index2].msb = (newctr >> 2);
+                    bank2_table[index2].tag = tag;
+                    bank2_table[index2].u = 0;
+
+                }
+            } else {
+                if (!bank4_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+                }
+
+                if (!bank3_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+
+                }
+
+                if (!bank2_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank2_table[index2].counter = newctr;
+                    bank2_table[index2].msb = (newctr >> 2);
+                    bank2_table[index2].tag = tag;
+                    bank2_table[index2].u = 0;
+
+                }
+            }
+
+        } else if (bank_chosen == 0) {
+
+            uint16_t bank4_u = bank4_table[index4].u;
+            uint16_t bank3_u = bank3_table[index3].u;
+            uint16_t bank2_u = bank2_table[index2].u;
+            uint16_t bank1_u = bank1_table[index1].u;
+            uint16_t bank_m = bimodal_table[index0].m;
+            uint8_t newctr = 0;
+
+            if (bank4_u && bank3_u && bank2_u && bank1_u) {
+                uint8_t random_choice = rand() % 4;
+                if (random_choice == 0) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+
+                } else if (random_choice == 1) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+
+                } else if (random_choice == 2) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank2_table[index2].counter = newctr;
+                    bank2_table[index2].msb = (newctr >> 2);
+                    bank2_table[index2].tag = tag;
+                    bank2_table[index2].u = 0;
+
+                } else {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank1_table[index1].counter = newctr;
+                    bank1_table[index1].msb = (newctr >> 2);
+                    bank1_table[index1].tag = tag;
+                    bank1_table[index1].u = 0;
+                }
+            } else {
+                if (!bank4_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank4_table[index4].counter = newctr;
+                    bank4_table[index4].msb = (newctr >> 2);
+                    bank4_table[index4].tag = tag;
+                    bank4_table[index4].u = 0;
+
+                }
+
+                if (!bank3_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank3_table[index3].counter = newctr;
+                    bank3_table[index3].msb = (newctr >> 2);
+                    bank3_table[index3].tag = tag;
+                    bank3_table[index3].u = 0;
+                }
+
+                if (!bank2_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank2_table[index2].counter = newctr;
+                    bank2_table[index2].msb = (newctr >> 2);
+                    bank2_table[index2].tag = tag;
+                    bank2_table[index2].u = 0;
+
+                }
+
+                if (!bank1_u) {
+                    if (bank_m) {
+                        if (taken) {
+                            newctr = 4;
+                        } else {
+                            newctr = 3;
+                        }
+                    } else {
+                        if ((bimodal_table[index0].msb)) {
+                            newctr = 4; 
+                        } else {
+                            newctr = 3; 
+                        }
+                    }
+
+                    bank1_table[index1].counter = newctr;
+                    bank1_table[index1].msb = (newctr >> 2);
+                    bank1_table[index1].tag = tag;
+                    bank1_table[index1].u = 0;
+                }
+            }
+        }
+
+    }
+
+    if (bank_chosen != 0) {
+
+        if (bank_pred == taken) {
+            bimodal_table[index0].m = 1;
+            if (bank_chosen == 1) {
+                bank1_table[index1].u = 1;
+            } else if (bank_chosen == 2) {
+                bank2_table[index2].u = 1;
+            } else if (bank_chosen == 3) {
+                bank3_table[index3].u = 1;
+            } else if (bank_chosen == 4) {
+                bank4_table[index4].u = 1;
+            }
+        } else {
+            bimodal_table[index0].m = 0;
+            if (bank_chosen == 1) {
+                bank1_table[index1].u = 0;
+            } else if (bank_chosen == 2) {
+                bank2_table[index2].u = 0;
+            } else if (bank_chosen == 3) {
+                bank3_table[index3].u = 0;
+            } else if (bank_chosen == 4) {
+                bank4_table[index4].u = 0;
+            }
+        }
+        
+    }
+        
+}

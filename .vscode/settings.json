@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "ppm_classes": "cpp",
+        "*.bpred": "cpp"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
+}
